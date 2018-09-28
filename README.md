@@ -1,9 +1,77 @@
 # hieros
 
-_Hieros_ is a text processing abstraction on top of [pulldown-cmark](https://github.com/google/pulldown-cmark).
+Hieros is a Rust crate providing a text processing abstraction built on top
+of [pulldown-cmark](https://github.com/google/pulldown-cmark), along with
+a few ready-made transformations and operations.
 
-Or rather, it will be.
+The text content is organized in `Part`s, which are "chunks" of CommonMark
+content and usually correspond to CommonMark files. `Part`s are grouped in a
+sequence, which forms the `Whole`. `Part`s have a `PartOrigin` which
+specifies where the content comes from (e.g. whether it comes from a file or
+it has been created).
 
-There's nothing here yet.
+The text thus collected can be analysed or processed by _passes_. There are
+three types of passes:
 
-Be patient.
+* `ReadOnlyPass`, which only reads `Part`s and the `Whole` and usually
+  constructs some internal state or produces side effects that do not affect
+  the data structures. For example, a word counter would be such a pass, or
+  even the final export of the CommonMark content to some output.
+* `LocalPass`, which can modify the content of `Part`s but not the structure
+  of the `Whole`. Text substitution functions are usually in this category.
+* `GlobalPass`, which can modify the structure of the `Whole` as well as
+  possibly the individual content of `Part`s. For example, something that
+  creates a table of contents and inserts it at the beginning of the
+  sequence.
+
+A common functionality of all passes is that they can access Hieros
+`Directives` specified in the CommonMark content. These are written in the
+input as CommonMark fenced code blocks with a language info tag equal to
+`hieros.<id>`, where `.<id>` is an optional identifier for a pass.
+Directives are obviously not intended to end up in the final output of the
+text manipulation, therefore a `RemoveDirectivesPass` is provided among the
+ready-made passes.
+
+The internal format of the text in the Hieros directives blocks is entirely
+arbitrary and may or may not be interpreted by the passes - the library only
+provides access to it.
+
+# Using `hieros`
+
+At the moment Hieros is not available on crates.io, but it will be in the
+future. Feel free to try it with:
+
+`hieros = { git = "https://github.com/hhexo/hieros.git" }`
+
+# Example
+
+```rust
+    use hieros::{PartOrigin, Part, Whole, ReadOnlyPass, LocalPass, RemoveDirectivesPass, HtmlExporterPass};
+    use std::path::Path;
+
+    let s1 = r#"
+    ```hieros.one
+    blah
+    ```
+
+    foo
+    "#;
+    let s2 = r#"
+    ```hieros.two
+    blah
+    ```
+
+    bar
+    "#;
+    let part1 = Part::from_str(s1, PartOrigin::RawString).unwrap();
+    let part2 = Part::from_str(s2, PartOrigin::RawString).unwrap();
+    let mut whole = Whole::from_parts(vec!(part1, part2));
+    // Remove directives, then output html files for each part
+    let mut rdp = RemoveDirectivesPass;
+    let mut hep = HtmlExporterPass::new(&Path::new("/tmp")).unwrap();
+    whole.parts_iter_mut().try_for_each(|part| {
+        rdp.apply(part, &mut ())
+    }).unwrap();
+    let mut files = Vec::new();
+    hep.apply(&whole, &mut files).unwrap();
+```

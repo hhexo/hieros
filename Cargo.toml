@@ -1,0 +1,7 @@
+[package]
+name = "hieros"
+version = "0.1.0"
+authors = ["Dario Domizioli <dario.domizioli@gmail.com>"]
+
+[dependencies]
+pulldown-cmark = "*"
