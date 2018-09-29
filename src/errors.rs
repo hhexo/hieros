@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std;
+use serde_json;
 
 /// An error that can be returned by Hieros operations.
 #[derive(Debug)]
@@ -20,11 +21,18 @@ pub enum HierosError {
     IOError(std::io::Error),
     PassCreationError(String),
     DirectiveParseError(String),
+    JSONParseError(serde_json::Error),
     GenericError(String),
 }
 
 impl std::convert::From<std::io::Error> for HierosError {
     fn from(e: std::io::Error) -> Self {
         HierosError::IOError(e)
+    }
+}
+
+impl std::convert::From<serde_json::Error> for HierosError {
+    fn from(e: serde_json::Error) -> Self {
+        HierosError::JSONParseError(e)
     }
 }

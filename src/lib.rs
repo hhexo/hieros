@@ -90,6 +90,10 @@
 //!
 
 extern crate pulldown_cmark;
+extern crate serde;
+extern crate serde_json;
+#[macro_use]
+extern crate serde_derive;
 
 mod content;
 mod errors;
@@ -97,4 +101,5 @@ mod passes;
 
 pub use content::{PartOrigin, Part, Whole};
 pub use errors::HierosError;
-pub use passes::{ReadOnlyPass, LocalPass, GlobalPass, DirectivePass, RemoveDirectivesPass, HtmlExporterPass};
+pub use passes::{ReadOnlyPass, LocalPass, GlobalPass, DirectivePass,
+                 RemoveDirectivesPass, HtmlExporterPass, IndexCreationPass};

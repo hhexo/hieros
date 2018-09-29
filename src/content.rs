@@ -46,6 +46,14 @@ impl<'a> Part<'a> {
         })
     }
 
+    /// Creates a Part from raw components.
+    pub fn from_raw(origin: PartOrigin, content: Vec<Event<'a>>) -> Part {
+        Part {
+            origin: origin,
+            content: content,
+        }
+    }
+
     pub fn origin(&self) -> &PartOrigin {
         &self.origin
     }

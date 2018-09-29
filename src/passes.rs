@@ -13,11 +13,13 @@
 // limitations under the License.
 use pulldown_cmark;
 use pulldown_cmark::{Event, Tag};
+use serde_json;
 
 use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::Write;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use content::{PartOrigin, Part, Whole};
 use errors::HierosError;
@@ -116,7 +118,6 @@ impl<ExternalState> LocalPass<ExternalState> for DirectivePass<ExternalState> {
         let mut directive_id = String::new();
         let mut directive_text = String::new();
         p.content_iter().fold(&mut new_content, |new_content, evt| {
-            println!("Parse state: {:?}", parse_state);
             match parse_state {
                 DirectiveParseState::Normal => {
                     match evt {
@@ -192,7 +193,6 @@ impl<ExternalState> LocalPass<ExternalState> for DirectivePass<ExternalState> {
         // no further results were pushed. Therefore, we can just return the
         // last element if present. If no directives were matched, the vector
         // is empty and we just return Ok.
-        println!("New content size: {}", new_content.len());
         match results.pop() {
             None => {
                 p.swap_content(new_content);
@@ -348,4 +348,166 @@ impl ReadOnlyPass<Vec<PathBuf>> for HtmlExporterPass {
             Ok(())
         })
     }
+}
+
+
+/// A `GlobalPass` which parses all `hieros.index` directives and constructs a
+/// `Part` at the end of the sequence, containing an analytical index of all the
+/// terms encountered while processing the directives.
+///
+/// Index directives are of the form:
+/// ~~~text
+///    ```hieros.index
+///    { "entry": "abc", "tag": "xyz" }
+///    ```
+/// ~~~
+/// Which means that the index will contain something like:
+///
+/// > **Abc**: xyz
+///
+/// Where "xyz" is a hyperlink to the location where the `hieros.index`
+/// directive was. The directive is elided by the pass.
+///
+/// If multiple directives are found with the same "entry", the index will
+/// generate hyperlinks for all "tags" on a single line. This:
+/// ~~~text
+///    ```hieros.index
+///    { "entry": "abc", "tag": "xyz" }
+///    ```
+///
+///    ...
+///
+///    ```hieros.index
+///    { "entry": "abc", "tag": "123" }
+///    ```
+/// ~~~
+/// results in this:
+///
+/// > **Abc**: xyz, 123
+///
+pub struct IndexCreationPass {
+    title: String,
+}
+
+impl IndexCreationPass {
+    pub fn new(title: &str) -> IndexCreationPass {
+        IndexCreationPass {
+            title: title.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct IndexEntry {
+    entry: String,
+    tag: String,
+}
+
+struct IndexLink {
+    tag: String,
+    link: String,
+}
+
+impl IndexEntry {
+    fn entry_hash(&self) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        self.entry.hash(&mut hasher);
+        self.tag.hash(&mut hasher);
+        format!("{}", hasher.finish())
+    }
+
+    fn anchor(&self) -> String {
+        format!("<a id=\"idx_{}\"></a>", self.entry_hash())
+    }
+
+    fn link_dest(&self) -> IndexLink {
+        IndexLink {
+            tag: self.tag.clone(),
+            link: format!("#idx_{}", self.entry_hash()),
+        }
+    }
+}
+
+impl GlobalPass<()> for IndexCreationPass {
+    /// Applies the pass and generates the index.
+    fn apply(&mut self, w: &mut Whole, _: &mut ()) -> Result<(), HierosError> {
+        // First of all gather all `hieros.index` directives and generate the
+        // index map.
+        let mut map : BTreeMap<String, Vec<IndexLink>> = BTreeMap::new();
+        let mut gather = DirectivePass::new(Some("index".to_string()), |_, text, new_content, state: &mut BTreeMap<String, Vec<IndexLink>>| {
+            let ie: IndexEntry = serde_json::from_str(text)?;
+            let me = state.entry(ie.entry.clone()).or_insert(Vec::new());
+            me.push(ie.link_dest());
+            new_content.push(Event::Html(Cow::Owned(ie.anchor().to_string())));
+            Ok(())
+        });
+        w.parts_iter_mut().try_for_each(|part| gather.apply(part, &mut map) )?;
+        // Then generate one last Part with the index content.
+        let mut events = Vec::new();
+        events.push(Event::Start(Tag::Header(1)));
+        events.push(Event::Text(Cow::Owned(format!("{}", self.title))));
+        events.push(Event::End(Tag::Header(1)));
+        map.iter().for_each(|(entry, links)| {
+            events.push(Event::Start(Tag::Paragraph));
+            events.push(Event::Start(Tag::Strong));
+            events.push(Event::Text(Cow::Owned(format!("{}: ", entry))));
+            events.push(Event::End(Tag::Strong));
+            let prev_size = events.len();
+            links.iter().fold(&mut events, |events, link| {
+                events.push(Event::Start(Tag::Link(Cow::Owned(link.link.clone()), Cow::Owned("".to_string()))));
+                events.push(Event::Text(Cow::Owned(format!("{}", link.tag.clone()))));
+                events.push(Event::End(Tag::Link(Cow::Owned(link.link.clone()), Cow::Owned("".to_string()))));
+                events.push(Event::Text(Cow::Owned(", ".to_string())));
+                events
+            });
+            if events.len() > prev_size {
+                // We've added something, remove last trailing comma
+                events.pop().unwrap();
+            }
+            events.push(Event::End(Tag::Paragraph));
+        });
+        w.parts_mut().push(Part::from_raw(PartOrigin::Created, events));
+        Ok(())
+    }
+}
+
+#[test]
+fn test_index_creation_pass() {
+    let s = r#"
+```hieros.index
+{"entry": "foo", "tag": "definition"}
+```
+foo
+
+```hieros.index
+{"entry": "bar", "tag": "definition"}
+```
+bar
+
+```hieros.index
+{"entry": "foo", "tag": "reference"}
+```
+another foo
+    "#;
+    let part = Part::from_str(s, PartOrigin::RawString).unwrap();
+    let mut whole = Whole::from_parts(vec!(part));
+    let mut pass = IndexCreationPass::new("Index");
+    pass.apply(&mut whole, &mut ()).unwrap();
+    let mut rendered = String::new();
+    whole.parts_iter().for_each(|part| {
+        pulldown_cmark::html::push_html(&mut rendered, part.content().iter().map(|evt| evt.clone()));
+    });
+    let expected = r##"<a id="idx_2779447855341772346"></a>
+<p>foo</p>
+<a id="idx_11561231166754964973"></a>
+<p>bar</p>
+<a id="idx_12124113799365418005"></a>
+<p>another foo</p>
+<h1>Index</h1>
+<p><strong>bar: </strong><a href="#idx_11561231166754964973">definition</a></p>
+<p><strong>foo: </strong><a href="#idx_2779447855341772346">definition</a>, <a href="#idx_12124113799365418005">reference</a></p>
+"##;
+    assert_eq!(rendered, expected);
 }
