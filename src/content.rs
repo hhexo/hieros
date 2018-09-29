@@ -57,6 +57,18 @@ impl<'a> Part<'a> {
     pub fn content_mut(&mut self) -> &mut Vec<Event<'a>> {
         &mut self.content
     }
+
+    pub fn content_iter(&self) -> Iter<Event<'a>> {
+        self.content.iter()
+    }
+
+    pub fn content_iter_mut(&mut self) -> IterMut<Event<'a>> {
+        self.content.iter_mut()
+    }
+
+    pub fn swap_content(&mut self, new_content: Vec<Event<'a>>) {
+        self.content = new_content
+    }
 }
 
 /// A Whole represents a collection of Parts. The ownership of the raw string
@@ -89,7 +101,7 @@ impl<'a> Whole<'a> {
 
 
 #[test]
-fn quick_test_part_creation() {
+fn test_part_creation() {
     let s1 = r#"
 ```hieros
 blah
@@ -107,4 +119,30 @@ bar
     let part2 = Part::from_str(s2, PartOrigin::RawString).unwrap();
     assert_eq!(part1.content().len(), 9);
     assert_eq!(part2.content().len(), 6);
+}
+
+#[test]
+fn test_part_swap_content() {
+    let s1 = r#"
+```hieros
+blah
+```
+foo
+
+bar
+    "#;
+    let s2 = r#"
+foo
+
+bar
+    "#;
+    let mut part1 = Part::from_str(s1, PartOrigin::RawString).unwrap();
+    assert_eq!(part1.content().len(), 9);
+    let mut opts = Options::empty();
+    opts.insert(OPTION_ENABLE_TABLES);
+    opts.insert(OPTION_ENABLE_FOOTNOTES);
+    let p = Parser::new_ext(s2, opts);
+    let content2 = p.collect();
+    part1.swap_content(content2);
+    assert_eq!(part1.content().len(), 6);
 }

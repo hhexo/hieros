@@ -17,6 +17,7 @@ use pulldown_cmark::{Event, Tag};
 use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::Write;
+use std::borrow::Cow;
 
 use content::{PartOrigin, Part, Whole};
 use errors::HierosError;
@@ -40,33 +41,63 @@ pub trait GlobalPass<ExternalState> {
     fn apply(&mut self, w: &mut Whole, state: &mut ExternalState) -> Result<(), HierosError>;
 }
 
-/// This utility `LocalPass` can be used to scan a `Part` and perform an operation
-/// upon encountering each Hieros directive that matches the specified id; if no
-/// id is provided, this Pass executes the operation on all Hieros directives.
-/// The Pass may or may not eliminate the directives once they are processed;
-/// this is controlled by the appropriate option.
+/// This utility `LocalPass` can be used to scan a `Part` and perform an
+/// operation upon encountering each Hieros directive that matches the specified
+/// id; if no id is provided, this Pass executes the operation on all Hieros
+/// directives. While performing operations, this Pass creates a new vector of
+/// `pulldown_cmark::Event`s as new content which will be swapped with the one
+/// in the `Part` at the end of the process: the vector does not contain the
+/// `Event`s for the directive but it can be modified by the operation,
+/// therefore allowing the Pass to replace the directive with some generated
+/// new text (or even preserve the directive - see `restore_directive()`).
+/// Furthermore, if an error is encountered performing operations then the new
+/// content will not be swapped and the `Part` will be unchanged.
 pub struct DirectivePass<ExternalState> {
     id: Option<String>,
-    op: fn(directive_text: &str, state: &mut ExternalState) -> Result<(), HierosError>,
-    kp: bool,
+    op: fn(directive_id: &str,
+           directive_text: &str,
+           new_content: &mut Vec<Event>,
+           state: &mut ExternalState)
+           -> Result<(), HierosError>,
 }
 
 impl<ExternalState> DirectivePass<ExternalState> {
+    /// Creates a new DirectivePass.
     pub fn new(
         id: Option<String>,
-        operation: fn(directive_text: &str, state: &mut ExternalState) -> Result<(), HierosError>,
-        remove_after_processed: bool,
+        operation: fn(directive_id: &str,
+                      directive_text: &str,
+                      new_content: &mut Vec<Event>,
+                      state: &mut ExternalState)
+                      -> Result<(), HierosError>,
     ) -> DirectivePass<ExternalState> {
         DirectivePass {
             id: id,
             op: operation,
-            kp: !remove_after_processed,
         }
+    }
+
+    /// Used to preserve an existing directive after processing. The default is
+    /// to eliminate it, but this function can be called from within the
+    /// provided operation so that the Hieros directive can be reconstructed.
+    pub fn restore_directive(
+        directive_id: &str,
+        directive_text: &str,
+        new_content: &mut Vec<Event>,
+    ) {
+        let e1 = Event::Start(Tag::CodeBlock(Cow::Owned(directive_id.to_string())));
+        let e2 = Event::Text(Cow::Owned(directive_text.to_string()));
+        let e3 = Event::End(Tag::CodeBlock(Cow::Owned(directive_id.to_string())));
+        new_content.push(e1);
+        new_content.push(e2);
+        new_content.push(e3);
     }
 }
 
 impl<ExternalState> LocalPass<ExternalState> for DirectivePass<ExternalState> {
     fn apply(&mut self, p: &mut Part, state: &mut ExternalState) -> Result<(), HierosError> {
+        let mut new_content = Vec::new();
+        let mut results = Vec::new();
         // State machine here is very simple. We scan the vector until we find
         // a Start event for a codeblock with the Hieros directive, at which
         // point we expect one or more text events containing the directive
@@ -82,79 +113,133 @@ impl<ExternalState> LocalPass<ExternalState> for DirectivePass<ExternalState> {
             ErrorFound,
         }
         let mut parse_state = DirectiveParseState::Normal;
+        let mut directive_id = String::new();
         let mut directive_text = String::new();
-        let mut results = Vec::new();
-        p.content_mut().retain(|e| match parse_state {
-            DirectiveParseState::Normal => {
-                match e {
-                    Event::Start(t) => {
-                        match t {
-                            Tag::CodeBlock(cow) => {
-                                let expected_tag_pattern = match self.id {
-                                    None => "hieros".to_string(),
-                                    Some(ref id) => format!("hieros.{}", id),
-                                };
-                                if cow.starts_with(&expected_tag_pattern) {
-                                    parse_state = DirectiveParseState::WithinDirective;
-                                    self.kp
-                                } else {
-                                    true
+        p.content_iter().fold(&mut new_content, |new_content, evt| {
+            println!("Parse state: {:?}", parse_state);
+            match parse_state {
+                DirectiveParseState::Normal => {
+                    match evt {
+                        Event::Start(t) => {
+                            match t {
+                                Tag::CodeBlock(cow) => {
+                                    let expected_tag_pattern = match self.id {
+                                        None => "hieros".to_string(),
+                                        Some(ref id) => format!("hieros.{}", id),
+                                    };
+                                    if cow.starts_with(&expected_tag_pattern) {
+                                        directive_id = cow.to_string();
+                                        parse_state = DirectiveParseState::WithinDirective;
+                                        new_content
+                                    } else {
+                                        new_content.push(evt.clone());
+                                        new_content
+                                    }
                                 }
+                                _ => {
+                                    new_content.push(evt.clone());
+                                    new_content
+                                },
                             }
-                            _ => true,
                         }
+                        _ => {
+                            new_content.push(evt.clone());
+                            new_content
+                        },
                     }
-                    _ => true,
-                }
-            },
-            DirectiveParseState::WithinDirective => {
-                match e {
-                    Event::Text(text) => {
-                        directive_text.push_str(text);
-                        self.kp
-                    },
-                    Event::End(t) => {
-                        match t {
-                            Tag::CodeBlock(_) => {
-                                let res = (self.op)(&directive_text, state);
-                                parse_state = match res {
-                                    Ok(_) => DirectiveParseState::Normal,
-                                    Err(_) => DirectiveParseState::ErrorFound,
-                                };
-                                results.push(res);
-                                directive_text.clear();
-                                self.kp
+                },
+                DirectiveParseState::WithinDirective => {
+                    match evt {
+                        Event::Text(ref text) => {
+                            directive_text.push_str(text);
+                            new_content
+                        },
+                        Event::End(t) => {
+                            match t {
+                                Tag::CodeBlock(_) => {
+                                    let res = (self.op)(&directive_id, &directive_text, new_content, state);
+                                    parse_state = match res {
+                                        Ok(_) => DirectiveParseState::Normal,
+                                        Err(_) => DirectiveParseState::ErrorFound,
+                                    };
+                                    results.push(res);
+                                    directive_id.clear();
+                                    directive_text.clear();
+                                    new_content
+                                }
+                                _ => {
+                                    results.push(Err(HierosError::DirectiveParseError(
+                                        "Unexpected pulldown_cmark End Event within a CommonMark fenced codeblock.".to_string())));
+                                    parse_state = DirectiveParseState::ErrorFound;
+                                    new_content
+                                },
                             }
-                            _ => {
-                                results.push(Err(HierosError::DirectiveParseError(
-                                    "Unexpected pulldown_cmark End Event within a CommonMark fenced codeblock.".to_string())));
-                                parse_state = DirectiveParseState::ErrorFound;
-                                true
-                            },
                         }
+                        _ => {
+                            results.push(Err(HierosError::DirectiveParseError(
+                                "Unexpected pulldown_cmark Event within a CommonMark fenced codeblock.".to_string())));
+                            parse_state = DirectiveParseState::ErrorFound;
+                            new_content
+                        },
                     }
-                    _ => {
-                        results.push(Err(HierosError::DirectiveParseError(
-                            "Unexpected pulldown_cmark Event within a CommonMark fenced codeblock.".to_string())));
-                        parse_state = DirectiveParseState::ErrorFound;
-                        true
-                    },
+                },
+                DirectiveParseState::ErrorFound => {
+                    new_content
                 }
-            },
-            DirectiveParseState::ErrorFound => {
-                true
             }
         });
         // In all cases where there was an error, the error was pushed last and
         // no further results were pushed. Therefore, we can just return the
         // last element if present. If no directives were matched, the vector
         // is empty and we just return Ok.
+        println!("New content size: {}", new_content.len());
         match results.pop() {
-            None => Ok(()),
-            Some(res) => res,
+            None => {
+                p.swap_content(new_content);
+                Ok(())
+            }
+            Some(res) => {
+                match res {
+                    Ok(_) => {
+                        p.swap_content(new_content);
+                        Ok(())
+                    }
+                    _ => res,
+                }
+            }
         }
     }
 }
+
+#[test]
+fn test_directive_nop_pass_preserving_directives() {
+    let s = r#"
+```hieros.one
+blah
+```
+
+foo
+
+```hieros
+blah
+```
+
+```hieros.two
+blah
+```
+
+bar
+    "#;
+    let mut part = Part::from_str(s, PartOrigin::RawString).unwrap();
+    assert_eq!(part.content().len(), 15);
+    let mut pass = DirectivePass::new(None, |directive_id, directive_text, new_content, _| {
+        DirectivePass::<()>::restore_directive(directive_id, directive_text, new_content);
+        Ok(())
+    });
+    pass.apply(&mut part, &mut ()).unwrap();
+    assert_eq!(part.content().len(), 15);
+}
+
 
 
 /// A `LocalPass` that removes all Hieros directives from the `Part` it is
@@ -165,13 +250,13 @@ impl LocalPass<()> for RemoveDirectivesPass {
     fn apply(&mut self, p: &mut Part, state: &mut ()) -> Result<(), HierosError> {
         // This pass is just a DirectivePass which does not do anything with
         // the directives and eliminates them.
-        let mut directive_pass = DirectivePass::new(None, |_, _| Ok(()), true);
+        let mut directive_pass = DirectivePass::new(None, |_, _, _, _| Ok(()));
         directive_pass.apply(p, state)
     }
 }
 
 #[test]
-fn quick_test_remove_directives() {
+fn test_remove_directives() {
     let s = r#"
 ```hieros.one
 blah
@@ -194,6 +279,21 @@ bar
     let mut pass = RemoveDirectivesPass;
     pass.apply(&mut part, &mut ()).unwrap();
     assert_eq!(part.content().len(), 6);
+    let mut rendered = String::new();
+    pulldown_cmark::html::push_html(&mut rendered, part.content().iter().map(|evt| evt.clone()));
+    assert_eq!(rendered, "<p>foo</p>\n<p>bar</p>\n");
+}
+
+#[test]
+fn test_remove_directives_preserves_content_when_no_directives() {
+    let s = r#"
+foo
+
+bar
+    "#;
+    let mut part = Part::from_str(s, PartOrigin::RawString).unwrap();
+    let mut pass = RemoveDirectivesPass;
+    pass.apply(&mut part, &mut ()).unwrap();
     let mut rendered = String::new();
     pulldown_cmark::html::push_html(&mut rendered, part.content().iter().map(|evt| evt.clone()));
     assert_eq!(rendered, "<p>foo</p>\n<p>bar</p>\n");
