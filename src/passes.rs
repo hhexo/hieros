@@ -324,10 +324,10 @@ impl ReadOnlyPass<Vec<PathBuf>> for HtmlExporterPass {
         w.parts().iter().try_for_each(|part| {
             let cur_filename = match part.origin() {
                 &PartOrigin::RawString |
-                &PartOrigin::Created => format!("{:0>4}.md", filenames.len()),
+                &PartOrigin::Created => format!("{:0>4}.html", filenames.len()),
                 &PartOrigin::CommonMarkFile(ref path) => {
                     format!(
-                        "{:0>4}-{}.md",
+                        "{:0>4}-{}.html",
                         filenames.len(),
                         path.file_name().unwrap().to_str().unwrap()
                     )
