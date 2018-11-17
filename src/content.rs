@@ -13,7 +13,7 @@
 // limitations under the License.
 use std::path::PathBuf;
 use std::slice::{Iter, IterMut};
-use pulldown_cmark::{Options, OPTION_ENABLE_TABLES, OPTION_ENABLE_FOOTNOTES, Event, Parser};
+use pulldown_cmark::{Options, Event, Parser};
 use errors::HierosError;
 
 /// This variant represents the origin of a `Part`: for example it can be a file
@@ -36,8 +36,8 @@ impl<'a> Part<'a> {
     /// that an external entity must own the actual string.
     pub fn from_str(text: &'a str, origin: PartOrigin) -> Result<Part, HierosError> {
         let mut opts = Options::empty();
-        opts.insert(OPTION_ENABLE_TABLES);
-        opts.insert(OPTION_ENABLE_FOOTNOTES);
+        opts.insert(Options::ENABLE_TABLES);
+        opts.insert(Options::ENABLE_FOOTNOTES);
         let p = Parser::new_ext(text, opts);
         let content = p.collect();
         Ok(Part {
@@ -147,8 +147,8 @@ bar
     let mut part1 = Part::from_str(s1, PartOrigin::RawString).unwrap();
     assert_eq!(part1.content().len(), 9);
     let mut opts = Options::empty();
-    opts.insert(OPTION_ENABLE_TABLES);
-    opts.insert(OPTION_ENABLE_FOOTNOTES);
+    opts.insert(Options::ENABLE_TABLES);
+    opts.insert(Options::ENABLE_FOOTNOTES);
     let p = Parser::new_ext(s2, opts);
     let content2 = p.collect();
     part1.swap_content(content2);
