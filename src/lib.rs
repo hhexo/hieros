@@ -37,17 +37,24 @@
 //!   sequence.
 //!
 //! A common functionality of all passes is that they can access Hieros
-//! Directives specified in the CommonMark content. These are written in the
-//! input as CommonMark fenced code blocks with a language info tag equal to
-//! `hieros.<id>`, where `.<id>` is an optional identifier for a pass.
+//! Directives specified in the CommonMark content. There are two types of
+//! Hieros Directives:
+//!
+//! * CommonMark fenced code blocks with a language tag of `hieros.<id>`, where
+//! `.<id>` is an optional identifier for a pass. The text contained in the
+//! fenced code block is the "directive text".
+//! * CommonMark inline code blocks formatted like `hieros.<id>: <text>`, where
+//! `.<id>` is an optional identifier for a pass and `<text>` is the "directive
+//! text".
+//!
+//! The internal format of the "directive text" is entirely arbitrary and may or
+//! may not be interpreted by the passes. Each pass is responsible for making
+//! use of it as it sees fit, and also for reporting meaningful errors if it
+//! detects that the syntax is wrong.
+//!
 //! Directives are obviously not intended to end up in the final output of the
 //! text manipulation, therefore a `RemoveDirectivesPass` is provided among the
 //! ready-made passes.
-//!
-//! The internal format of the text in the Hieros directives blocks is entirely
-//! arbitrary and may or may not be interpreted by the passes. Each pass is
-//! responsible for making use of it as it sees fit, and also for reporting
-//! meaningful errors if it detects that the syntax is wrong.
 //!
 //! # Using `hieros`
 //!
@@ -71,9 +78,7 @@
 //!     foo
 //!     "#;
 //!     let s2 = r#"
-//!     ```hieros.two
-//!     blah
-//!     ```
+//!     `hieros.two: blah`
 //!
 //!     bar
 //!     "#;

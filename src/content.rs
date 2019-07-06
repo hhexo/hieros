@@ -125,8 +125,8 @@ bar
     "#;
     let part1 = Part::from_str(s1, PartOrigin::RawString).unwrap();
     let part2 = Part::from_str(s2, PartOrigin::RawString).unwrap();
-    assert_eq!(part1.content().len(), 9);
-    assert_eq!(part2.content().len(), 6);
+    assert_eq!(part1.content().len(), 10);
+    assert_eq!(part2.content().len(), 7);
 }
 
 #[test]
@@ -145,12 +145,12 @@ foo
 bar
     "#;
     let mut part1 = Part::from_str(s1, PartOrigin::RawString).unwrap();
-    assert_eq!(part1.content().len(), 9);
+    assert_eq!(part1.content().len(), 10);
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_FOOTNOTES);
     let p = Parser::new_ext(s2, opts);
     let content2 = p.collect();
     part1.swap_content(content2);
-    assert_eq!(part1.content().len(), 6);
+    assert_eq!(part1.content().len(), 7);
 }

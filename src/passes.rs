@@ -12,13 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 use pulldown_cmark;
-use pulldown_cmark::{Event, Tag};
+use pulldown_cmark::{Event, Tag, CowStr, LinkType};
 use serde_json;
 
 use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::Write;
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use content::{PartOrigin, Part, Whole};
@@ -43,6 +42,13 @@ pub trait GlobalPass<ExternalState> {
     fn apply(&mut self, w: &mut Whole, state: &mut ExternalState) -> Result<(), HierosError>;
 }
 
+/// This represents the type of Hieros directive encountered.
+#[derive(Clone,Copy,PartialEq,Eq)]
+pub enum HierosDirectiveType {
+    FromFencedCodeblock,
+    FromInlineCodeblock
+}
+
 /// This utility `LocalPass` can be used to scan a `Part` and perform an
 /// operation upon encountering each Hieros directive that matches the specified
 /// id; if no id is provided, this Pass executes the operation on all Hieros
@@ -56,7 +62,8 @@ pub trait GlobalPass<ExternalState> {
 /// content will not be swapped and the `Part` will be unchanged.
 pub struct DirectivePass<ExternalState> {
     id: Option<String>,
-    op: fn(directive_id: &str,
+    op: fn(directive_type: HierosDirectiveType,
+           directive_id: &str,
            directive_text: &str,
            new_content: &mut Vec<Event>,
            state: &mut ExternalState)
@@ -67,7 +74,8 @@ impl<ExternalState> DirectivePass<ExternalState> {
     /// Creates a new DirectivePass.
     pub fn new(
         id: Option<String>,
-        operation: fn(directive_id: &str,
+        operation: fn(directive_type: HierosDirectiveType,
+                      directive_id: &str,
                       directive_text: &str,
                       new_content: &mut Vec<Event>,
                       state: &mut ExternalState)
@@ -79,20 +87,30 @@ impl<ExternalState> DirectivePass<ExternalState> {
         }
     }
 
-    /// Used to preserve an existing directive after processing. The default is
-    /// to eliminate it, but this function can be called from within the
-    /// provided operation so that the Hieros directive can be reconstructed.
+    /// Used to preserve an existing fenced codeblock directive after
+    /// processing. The default is to eliminate it, but this function can be
+    /// called from within the provided operation so that the Hieros directive
+    /// can be reconstructed.
     pub fn restore_directive(
+        directive_type: HierosDirectiveType,
         directive_id: &str,
         directive_text: &str,
         new_content: &mut Vec<Event>,
     ) {
-        let e1 = Event::Start(Tag::CodeBlock(Cow::Owned(directive_id.to_string())));
-        let e2 = Event::Text(Cow::Owned(directive_text.to_string()));
-        let e3 = Event::End(Tag::CodeBlock(Cow::Owned(directive_id.to_string())));
-        new_content.push(e1);
-        new_content.push(e2);
-        new_content.push(e3);
+        match directive_type {
+            HierosDirectiveType::FromFencedCodeblock => {
+                let e1 = Event::Start(Tag::CodeBlock(CowStr::Boxed(directive_id.to_owned().into_boxed_str())));
+                let e2 = Event::Text(CowStr::Boxed(directive_text.to_owned().into_boxed_str()));
+                let e3 = Event::End(Tag::CodeBlock(CowStr::Boxed(directive_id.to_owned().into_boxed_str())));
+                new_content.push(e1);
+                new_content.push(e2);
+                new_content.push(e3);
+            },
+            HierosDirectiveType::FromInlineCodeblock => {
+                let e = Event::Code(CowStr::Boxed(format!("{}: {}", directive_id, directive_text).into_boxed_str()));
+                new_content.push(e);
+            },
+        }
     }
 }
 
@@ -101,10 +119,9 @@ impl<ExternalState> LocalPass<ExternalState> for DirectivePass<ExternalState> {
         let mut new_content = Vec::new();
         let mut results = Vec::new();
         // State machine here is very simple. We scan the vector until we find
-        // a Start event for a codeblock with the Hieros directive, at which
-        // point we expect one or more text events containing the directive
-        // text, and we collect the text; finally, upon an End event for the
-        // codeblock we run the self.op function and revert to normal state.
+        // a structure that corresponds to a Hieros directive (either a fenced
+        // codeblock or an inline codeblock), and we extract the directive id
+        // and text. Then we run the self.op function and proceed.
         // While iterating, we only keep the directive events in the vector if
         // self.kp is false. If an error is encountered, the scan continues
         // but performs no further operations and ultimately returns the error.
@@ -121,6 +138,42 @@ impl<ExternalState> LocalPass<ExternalState> for DirectivePass<ExternalState> {
             match parse_state {
                 DirectiveParseState::Normal => {
                     match evt {
+                        Event::Code(full_text) => {
+                            // Could be an inline code directive.
+                            let splits: Vec<String> = full_text.split(":").map(|s| s.to_owned()).collect();
+                            if splits.len() > 1 {
+                                let expected_tag_pattern = match self.id {
+                                    None => "hieros".to_string(),
+                                    Some(ref id) => format!("hieros.{}", id),
+                                };
+                                if splits[0].starts_with(&expected_tag_pattern) {
+                                    directive_id = splits[0].clone();
+                                    directive_text = splits[1..].iter().fold(String::new(), |mut a, s| {
+                                        let empty = a.len() == 0;
+                                        if !empty {
+                                            a.push_str(":");
+                                        }
+                                        a.push_str(&s);
+                                        a
+                                    }).trim_start().to_string();
+                                    let res = (self.op)(HierosDirectiveType::FromInlineCodeblock, &directive_id, &directive_text, new_content, state);
+                                    parse_state = match res {
+                                        Ok(_) => DirectiveParseState::Normal,
+                                        Err(_) => DirectiveParseState::ErrorFound,
+                                    };
+                                    results.push(res);
+                                    directive_id.clear();
+                                    directive_text.clear();
+                                    new_content
+                                } else {
+                                    new_content.push(evt.clone());
+                                    new_content
+                                }
+                            } else {
+                                new_content.push(evt.clone());
+                                new_content
+                            }
+                        },
                         Event::Start(t) => {
                             match t {
                                 Tag::CodeBlock(cow) => {
@@ -158,7 +211,7 @@ impl<ExternalState> LocalPass<ExternalState> for DirectivePass<ExternalState> {
                         Event::End(t) => {
                             match t {
                                 Tag::CodeBlock(_) => {
-                                    let res = (self.op)(&directive_id, &directive_text, new_content, state);
+                                    let res = (self.op)(HierosDirectiveType::FromFencedCodeblock, &directive_id, &directive_text, new_content, state);
                                     parse_state = match res {
                                         Ok(_) => DirectiveParseState::Normal,
                                         Err(_) => DirectiveParseState::ErrorFound,
@@ -224,20 +277,18 @@ foo
 blah
 ```
 
-```hieros.two
-blah
-```
+`hieros.two: blah:blah`
 
 bar
     "#;
     let mut part = Part::from_str(s, PartOrigin::RawString).unwrap();
-    assert_eq!(part.content().len(), 15);
-    let mut pass = DirectivePass::new(None, |directive_id, directive_text, new_content, _| {
-        DirectivePass::<()>::restore_directive(directive_id, directive_text, new_content);
+    assert_eq!(part.content().len(), 16);
+    let mut pass = DirectivePass::new(None, |directive_type, directive_id, directive_text, new_content, _| {
+        DirectivePass::<()>::restore_directive(directive_type, directive_id, directive_text, new_content);
         Ok(())
     });
     pass.apply(&mut part, &mut ()).unwrap();
-    assert_eq!(part.content().len(), 15);
+    assert_eq!(part.content().len(), 16);
 }
 
 
@@ -250,7 +301,7 @@ impl LocalPass<()> for RemoveDirectivesPass {
     fn apply(&mut self, p: &mut Part, state: &mut ()) -> Result<(), HierosError> {
         // This pass is just a DirectivePass which does not do anything with
         // the directives and eliminates them.
-        let mut directive_pass = DirectivePass::new(None, |_, _, _, _| Ok(()));
+        let mut directive_pass = DirectivePass::new(None, |_, _, _, _, _| Ok(()));
         directive_pass.apply(p, state)
     }
 }
@@ -268,20 +319,18 @@ foo
 blah
 ```
 
-```hieros.two
-blah
-```
+`hieros.two: blah:blah`
 
 bar
     "#;
     let mut part = Part::from_str(s, PartOrigin::RawString).unwrap();
-    assert_eq!(part.content().len(), 15);
+    assert_eq!(part.content().len(), 16);
     let mut pass = RemoveDirectivesPass;
     pass.apply(&mut part, &mut ()).unwrap();
-    assert_eq!(part.content().len(), 6);
+    assert_eq!(part.content().len(), 9);
     let mut rendered = String::new();
     pulldown_cmark::html::push_html(&mut rendered, part.content().iter().map(|evt| evt.clone()));
-    assert_eq!(rendered, "<p>foo</p>\n<p>bar</p>\n");
+    assert_eq!(rendered, "<p>foo</p>\n<p></p>\n<p>bar\n</p>\n");
 }
 
 #[test]
@@ -296,7 +345,7 @@ bar
     pass.apply(&mut part, &mut ()).unwrap();
     let mut rendered = String::new();
     pulldown_cmark::html::push_html(&mut rendered, part.content().iter().map(|evt| evt.clone()));
-    assert_eq!(rendered, "<p>foo</p>\n<p>bar</p>\n");
+    assert_eq!(rendered, "<p>foo</p>\n<p>bar\n</p>\n");
 }
 
 
@@ -436,30 +485,30 @@ impl GlobalPass<()> for IndexCreationPass {
         // First of all gather all `hieros.index` directives and generate the
         // index map.
         let mut map : BTreeMap<String, Vec<IndexLink>> = BTreeMap::new();
-        let mut gather = DirectivePass::new(Some("index".to_string()), |_, text, new_content, state: &mut BTreeMap<String, Vec<IndexLink>>| {
+        let mut gather = DirectivePass::new(Some("index".to_string()), |_, _, text, new_content, state: &mut BTreeMap<String, Vec<IndexLink>>| {
             let ie: IndexEntry = serde_json::from_str(text)?;
             let me = state.entry(ie.entry.clone()).or_insert(Vec::new());
             me.push(ie.link_dest());
-            new_content.push(Event::Html(Cow::Owned(ie.anchor().to_string())));
+            new_content.push(Event::Html(CowStr::Boxed(ie.anchor().clone().into_boxed_str())));
             Ok(())
         });
         w.parts_iter_mut().try_for_each(|part| gather.apply(part, &mut map) )?;
         // Then generate one last Part with the index content.
         let mut events = Vec::new();
         events.push(Event::Start(Tag::Header(1)));
-        events.push(Event::Text(Cow::Owned(format!("{}", self.title))));
+        events.push(Event::Text(CowStr::Boxed(format!("{}", self.title).into_boxed_str())));
         events.push(Event::End(Tag::Header(1)));
         map.iter().for_each(|(entry, links)| {
             events.push(Event::Start(Tag::Paragraph));
             events.push(Event::Start(Tag::Strong));
-            events.push(Event::Text(Cow::Owned(format!("{}: ", entry))));
+            events.push(Event::Text(CowStr::Boxed(format!("{}: ", entry).into_boxed_str())));
             events.push(Event::End(Tag::Strong));
             let prev_size = events.len();
             links.iter().fold(&mut events, |events, link| {
-                events.push(Event::Start(Tag::Link(Cow::Owned(link.link.clone()), Cow::Owned("".to_string()))));
-                events.push(Event::Text(Cow::Owned(format!("{}", link.tag.clone()))));
-                events.push(Event::End(Tag::Link(Cow::Owned(link.link.clone()), Cow::Owned("".to_string()))));
-                events.push(Event::Text(Cow::Owned(", ".to_string())));
+                events.push(Event::Start(Tag::Link(LinkType::Inline, CowStr::Boxed(link.link.to_owned().into_boxed_str()), CowStr::Boxed(String::new().into_boxed_str()))));
+                events.push(Event::Text(CowStr::Boxed(format!("{}", link.tag.clone()).into_boxed_str())));
+                events.push(Event::End(Tag::Link(LinkType::Inline, CowStr::Boxed(link.link.to_owned().into_boxed_str()), CowStr::Boxed(String::new().into_boxed_str()))));
+                events.push(Event::Text(CowStr::Borrowed(", ")));
                 events
             });
             if events.len() > prev_size {
@@ -486,10 +535,7 @@ foo
 ```
 bar
 
-```hieros.index
-{"entry": "foo", "tag": "reference"}
-```
-another foo
+`hieros.index: {"entry": "foo", "tag": "reference"}` another foo
     "#;
     let part = Part::from_str(s, PartOrigin::RawString).unwrap();
     let mut whole = Whole::from_parts(vec!(part));
@@ -503,8 +549,8 @@ another foo
 <p>foo</p>
 <a id="idx_11561231166754964973"></a>
 <p>bar</p>
-<a id="idx_12124113799365418005"></a>
-<p>another foo</p>
+<p><a id="idx_12124113799365418005"></a> another foo
+</p>
 <h1>Index</h1>
 <p><strong>bar: </strong><a href="#idx_11561231166754964973">definition</a></p>
 <p><strong>foo: </strong><a href="#idx_2779447855341772346">definition</a>, <a href="#idx_12124113799365418005">reference</a></p>

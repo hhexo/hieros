@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["Dario Domizioli <dario.domizioli@gmail.com>"]
 
 [dependencies]
-pulldown-cmark = "*"
+pulldown-cmark = "^0.5"
 serde = "^1.0"
 serde_json = "^1.0"
 serde_derive = "^1.0"
