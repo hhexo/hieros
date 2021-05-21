@@ -14,6 +14,7 @@
 
 use std;
 use serde_json;
+use serde_yaml;
 
 /// An error that can be returned by Hieros operations.
 #[derive(Debug)]
@@ -22,6 +23,7 @@ pub enum HierosError {
     PassCreationError(String),
     DirectiveParseError(String),
     JSONParseError(serde_json::Error),
+    YAMLParseError(serde_yaml::Error),
     GenericError(String),
 }
 
@@ -34,5 +36,11 @@ impl std::convert::From<std::io::Error> for HierosError {
 impl std::convert::From<serde_json::Error> for HierosError {
     fn from(e: serde_json::Error) -> Self {
         HierosError::JSONParseError(e)
+    }
+}
+
+impl std::convert::From<serde_yaml::Error> for HierosError {
+    fn from(e: serde_yaml::Error) -> Self {
+        HierosError::YAMLParseError(e)
     }
 }
